@@ -1,0 +1,212 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Leaflet Ride Simulator - Manual with Speed & Reset</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine/dist/leaflet-routing-machine.css"/>
+  <style>
+    html, body { height:100%; margin:0; }
+    #map { height:100%; }
+    #dashboard {
+      position:absolute; top:10px; left:10px; z-index:1000;
+      background:white; padding:10px 14px; border-radius:8px;
+      box-shadow:0 2px 8px rgba(0,0,0,0.25);
+      font-family:system-ui, sans-serif; font-size:14px;
+    }
+    #dashboard h3 { margin:0 0 8px; font-size:16px; }
+    #dashboard p { margin:4px 0; }
+    button {
+      margin-top:6px; padding:6px 12px;
+      background:#007bff; color:white; border:none; border-radius:6px;
+      cursor:pointer; font-size:14px;
+    }
+    button:disabled { background:#aaa; cursor:not-allowed; }
+    #manualInput { width:50px; margin-left:6px; }
+  </style>
+</head>
+<body>
+<div id="map"></div>
+<div id="dashboard">
+  <h3>🚴 Ride Stats</h3>
+  <p><b>Distance traveled:</b> <span id="distTraveled">0</span> m</p>
+  <p><b>Remaining:</b> <span id="distRemaining">0</span> m</p>
+  <p><b>Time riding:</b> <span id="timeRiding">00:00:00</span></p>
+  <p><b>Speed:</b> <span id="speed">0</span> km/h</p>
+  <button id="startBtn" disabled>▶ Start Ride</button>
+  <div style="margin-top:6px;">
+    <label>Advance manually (m):</label>
+    <input type="number" id="manualInput" value="5" min="1">
+    <button id="manualBtn" disabled>Advance</button>
+  </div>
+  <button id="resetBtn" disabled>🔄 Reset Ride</button>
+</div>
+
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet-routing-machine/dist/leaflet-routing-machine.js"></script>
+
+<script>
+const map = L.map('map').fitWorld();
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(map);
+
+const destination = L.latLng(20.676722, -103.347618);
+let userMarker, routePoints = [], traveled = 0, totalRoute = 0;
+let timerInterval = null, secondsRiding = 0;
+let currentIndex = 0;
+let lastAdvanceTime = null;
+let lastTraveled = 0;
+
+// Dashboard elements
+const distTraveledEl = document.getElementById("distTraveled");
+const distRemainingEl = document.getElementById("distRemaining");
+const timeRidingEl = document.getElementById("timeRiding");
+const speedEl = document.getElementById("speed");
+const startBtn = document.getElementById("startBtn");
+const manualInput = document.getElementById("manualInput");
+const manualBtn = document.getElementById("manualBtn");
+const resetBtn = document.getElementById("resetBtn");
+
+function distance(a,b){
+  const R=6371000;
+  const dLat=(b.lat-a.lat)*Math.PI/180;
+  const dLng=(b.lng-a.lng)*Math.PI/180;
+  const lat1=a.lat*Math.PI/180;
+  const lat2=b.lat*Math.PI/180;
+  const h=Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLng/2)**2;
+  return 2*R*Math.asin(Math.sqrt(h));
+}
+
+function interpolate(a,b,ratio){
+  return L.latLng(a.lat+(b.lat-a.lat)*ratio, a.lng+(b.lng-a.lng)*ratio);
+}
+
+function resampleRoute(coords, step){
+  let points=[coords[0]];
+  for(let i=0;i<coords.length-1;i++){
+    const a=coords[i], b=coords[i+1];
+    const segDist = distance(a,b);
+    const numSteps = Math.floor(segDist/step);
+    for(let j=1;j<=numSteps;j++){
+      const ratio=(j*step)/segDist;
+      points.push(interpolate(a,b,ratio));
+    }
+  }
+  return points;
+}
+
+function updateDashboard(){
+  distTraveledEl.textContent = traveled.toFixed(1);
+  distRemainingEl.textContent = Math.max(totalRoute-traveled,0).toFixed(1);
+  const hrs = String(Math.floor(secondsRiding/3600)).padStart(2,'0');
+  const mins = String(Math.floor((secondsRiding%3600)/60)).padStart(2,'0');
+  const secs = String(secondsRiding%60).padStart(2,'0');
+  timeRidingEl.textContent = `${hrs}:${mins}:${secs}`;
+  
+  // Calculate speed in km/h
+  if(lastAdvanceTime){
+    const deltaTime = (Date.now() - lastAdvanceTime)/1000; // seconds
+    const deltaDist = traveled - lastTraveled; // meters
+    const speedKmh = (deltaDist / deltaTime) * 3.6;
+    speedEl.textContent = speedKmh.toFixed(1);
+  }
+}
+
+function advanceMarker(meters){
+  if(currentIndex >= routePoints.length-1) return;
+  let distanceToMove = meters;
+  const duration = 500; // smooth animation duration in ms
+  const steps = 50;
+  let stepIndex = 0;
+
+  const moveStep = () => {
+    if(distanceToMove <= 0 || currentIndex >= routePoints.length-1) return;
+    const segDist = distance(routePoints[currentIndex], routePoints[currentIndex+1]);
+    let moveDist = Math.min(segDist, distanceToMove);
+    const ratio = moveDist / segDist;
+    const pos = interpolate(routePoints[currentIndex], routePoints[currentIndex+1], ratio);
+    userMarker.setLatLng(pos);
+    map.panTo(pos, {animate:true});
+    distanceToMove -= moveDist;
+
+    if(moveDist >= segDist){
+      currentIndex++;
+    }
+
+    if(distanceToMove > 0 && currentIndex < routePoints.length-1){
+      setTimeout(moveStep, duration/steps);
+    } else {
+      traveled += meters;
+      lastTraveled = traveled;
+      lastAdvanceTime = Date.now();
+      updateDashboard();
+    }
+  };
+
+  moveStep();
+}
+
+function startRide(){
+  if(timerInterval) return;
+  timerInterval = setInterval(()=>{
+    secondsRiding++;
+    updateDashboard();
+  },1000);
+}
+
+function resetRide(){
+  traveled = 0;
+  currentIndex = 0;
+  secondsRiding = 0;
+  lastAdvanceTime = null;
+  lastTraveled = 0;
+  userMarker.setLatLng(routePoints[0]);
+  map.panTo(routePoints[0], {animate:true});
+  updateDashboard();
+}
+
+map.locate({setView:true,maxZoom:16});
+
+map.on('locationfound', function(e){
+  const userLocation = e.latlng;
+  userMarker = L.marker(userLocation).addTo(map).bindPopup("Ready to ride").openPopup();
+
+  const control = L.Routing.control({
+    waypoints: [userLocation,destination],
+    routeWhileDragging:false,
+    addWaypoints:false
+  }).addTo(map);
+
+  control.on('routesfound', function(ev){
+    const coords = ev.routes[0].coordinates.map(c=>L.latLng(c.lat,c.lng));
+    totalRoute = 0;
+    for(let i=0;i<coords.length-1;i++){ totalRoute+=distance(coords[i],coords[i+1]); }
+    routePoints = resampleRoute(coords, 5);
+    updateDashboard();
+
+    startBtn.disabled = false;
+    manualBtn.disabled = false;
+    resetBtn.disabled = false;
+
+    startBtn.addEventListener("click", ()=>{
+      startBtn.disabled=true;
+      startRide();
+    });
+
+    manualBtn.addEventListener("click", ()=>{
+      const manualMeters = parseFloat(manualInput.value);
+      if(!isNaN(manualMeters) && manualMeters>0){
+        advanceMarker(manualMeters);
+      }
+    });
+
+    resetBtn.addEventListener("click", ()=>{
+      resetRide();
+      startBtn.disabled = false;
+    });
+  });
+});
+
+map.on('locationerror', function(){ alert("Location access denied."); });
+</script>
+</body>
+</html>
